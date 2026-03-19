@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  recall-mcp:
+    build: .
+    container_name: recall-mcp
+    restart: unless-stopped
+    ports:
+      - "4000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./.cache:/app/.cache
+    environment:
+      - PORT=3000
+      - RECALL_AUTH_KEY=secure_token_12345
+      - NODE_ENV=production

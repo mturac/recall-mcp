@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Persistent data and models (ignored to prevent local DBs in git)
+data/
+.cache/
+models/
+
+# Environment variables
+.env
+.env.local
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+
+# Test files
+coverage/
+*.test.db
+local_sse_test.js
+local_sse_test.mjs
+proxy_test.js
+
+# Proxy file (can choose to keep it, but often host-specific pathing)
+# proxy.js 
+# better to keep proxy.js in repo as a tool but keep its configs in env
