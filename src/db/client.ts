@@ -42,6 +42,14 @@ db.exec(`
     access_count INTEGER DEFAULT 0
   );
 
+  -- Hot-path indexes: GC and digest do range scans on namespace + weight +
+  -- updated_at; without these the cost grows linearly with the brain size.
+  CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
+  CREATE INDEX IF NOT EXISTS idx_memories_namespace_weight ON memories(namespace, weight);
+  CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+  CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at);
+
   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
     summary,

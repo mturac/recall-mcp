@@ -15,18 +15,27 @@ const RECALL_TOKEN = process.env.RECALL_TOKEN || 'secure_token_12345';
 
 async function runProxy() {
     // 1. Connect to the SSE Server as a Client
+    //
+    // We deliberately do NOT put the token in the URL query string anymore:
+    // it would end up in every reverse-proxy access log, browser history and
+    // SSE referer header. The Authorization header below is the supported
+    // path. (Review high finding: insecure auth-token transmission.)
     const url = new URL(RECALL_URL);
-    url.searchParams.set('auth', RECALL_TOKEN);
-    
+
     const transport = new SSEClientTransport(url, {
-        // GET /sse (EventSource) often has trouble with headers in some polyfills, 
-        // so we use the query param above.
-        // POST /message (fetch) works fine with headers.
         requestInit: {
             headers: {
-                'Authorization': `Bearer ${RECALL_TOKEN}`
-            }
-        }
+                'Authorization': `Bearer ${RECALL_TOKEN}`,
+            },
+        },
+        // EventSource itself does not send custom headers, so configure the
+        // SSE client to attach them on the fetch-based fallback.
+        eventSourceInit: {
+            // @ts-ignore — `headers` is honoured by the polyfill used in MCP.
+            headers: {
+                'Authorization': `Bearer ${RECALL_TOKEN}`,
+            },
+        },
     });
 
 

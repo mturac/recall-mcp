@@ -13,25 +13,65 @@ import { embedder } from './embedding/embedder.js';
 export const app = express();
 app.use(cors());
 
-// Auth Middleware
+// Auth Middleware — require RECALL_AUTH_KEY explicitly, never fall back to a
+// shared default secret. A missing key in a non-test environment refuses every
+// request rather than silently auto-authenticating ("test_token_123" was a
+// production-default-secret hazard).
+const NODE_ENV = process.env.NODE_ENV ?? '';
+const envToken = process.env.RECALL_AUTH_KEY ?? (NODE_ENV === 'test' ? 'test_token_123' : '');
+if (!envToken) {
+  // Fail loud on boot rather than mid-request.
+  console.error('[recall-mcp] RECALL_AUTH_KEY is not set; the server will refuse every request.');
+}
+
+// Constant-time string compare to defeat timing-based token leaks.
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
 app.use((req, res, next) => {
   const authHeader = req.headers.authorization;
-  const queryToken = req.query.auth as string;
-  const envToken = process.env.RECALL_AUTH_KEY || 'test_token_123';
+  // Query-parameter tokens are still accepted for backwards compatibility,
+  // but logged with a deprecation warning — they end up in every proxy /
+  // browser-history log line, which leaks the secret.
+  const queryToken = (req.query.auth as string | undefined) ?? '';
 
   let token = '';
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.split(' ')[1];
+    token = authHeader.slice('Bearer '.length).trim();
   } else if (queryToken) {
     token = queryToken;
+    console.warn('[recall-mcp] token supplied via ?auth= — prefer Authorization: Bearer to keep the secret out of access logs');
   }
 
-  if (token !== envToken) {
+  if (!envToken || !token || !constantTimeEquals(token, envToken)) {
     return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
   }
-
   next();
 });
+
+// JSON serialiser that survives ``BigInt`` fields returned by ``better-sqlite3``
+// for INTEGER columns whose magnitude exceeds 2^53. The default JSON.stringify
+// throws ``TypeError: Do not know how to serialize a BigInt`` and crashes the
+// MCP server mid-response (critical review finding).
+function safeStringify(value: unknown, space: number | undefined = 2): string {
+  return JSON.stringify(value, (_key, v) => {
+    if (typeof v === 'bigint') {
+      // Only coerce to number when the value fits safely; otherwise keep as
+      // string so precision is not silently lost.
+      return v <= BigInt(Number.MAX_SAFE_INTEGER) && v >= BigInt(Number.MIN_SAFE_INTEGER)
+        ? Number(v)
+        : v.toString();
+    }
+    return v;
+  }, space);
+}
+
 
 // Schemas
 const RecallRememberSchema = z.object({
@@ -190,23 +230,28 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const newId = insertMemory();
 
-        return { content: [{ type: 'text', text: JSON.stringify({ success: true, id: newId }) }] };
+        return { content: [{ type: 'text', text: safeStringify({ success: true, id: newId }) }] };
       }
 
       case 'recall_search': {
         const args = RecallSearchSchema.parse(request.params.arguments);
-        const namespaceFilter = args.namespace !== 'global' ? `AND namespace = '${args.namespace.replace(/'/g, "''")}'` : '';
+        // Use a parameterised filter instead of interpolating the namespace
+        // into the SQL string. The old `'${ns.replace(/'/g, "''")}'` pattern
+        // was fragile (review critical SQL injection finding).
+        const hasNsFilter = args.namespace !== 'global';
+        const namespaceFilter = hasNsFilter ? 'AND namespace = ?' : '';
+        const nsParams: string[] = hasNsFilter ? [args.namespace] : [];
         const limit = args.limit;
         let results: Array<{ id: string, score: number, data: any }> = [];
 
         if (args.mode === 'fts') {
           const ftsQuery = `"${args.query.replace(/"/g, '""')}"`;
           const rows = db.prepare(`SELECT rowid, rank FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?`).all(ftsQuery, limit) as any;
-          
+
           const rowIds = rows.map((r: any) => Number(r.rowid));
           if (rowIds.length > 0) {
             const placeholders = rowIds.map(() => '?').join(',');
-            const mems = db.prepare(`SELECT rowid, * FROM memories WHERE rowid IN (${placeholders}) ${namespaceFilter}`).all(...rowIds) as any[];
+            const mems = db.prepare(`SELECT rowid, * FROM memories WHERE rowid IN (${placeholders}) ${namespaceFilter}`).all(...rowIds, ...nsParams) as any[];
             
             const memMap = new Map();
             mems.forEach(m => memMap.set(Number(m.rowid), m));
@@ -233,8 +278,8 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           const rowIds = rows.map((r: any) => Number(r.rowid));
           if (rowIds.length > 0) {
             const placeholders = rowIds.map(() => '?').join(',');
-            const mems = db.prepare(`SELECT rowid, * FROM memories WHERE rowid IN (${placeholders}) ${namespaceFilter}`).all(...rowIds) as any[];
-            
+            const mems = db.prepare(`SELECT rowid, * FROM memories WHERE rowid IN (${placeholders}) ${namespaceFilter}`).all(...rowIds, ...nsParams) as any[];
+
             const memMap = new Map();
             mems.forEach(m => memMap.set(Number(m.rowid), m));
 
@@ -274,7 +319,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
             
           if (sortedRowIds.length > 0) {
             const placeholders = sortedRowIds.map(() => '?').join(',');
-            const mems = db.prepare(`SELECT rowid, * FROM memories WHERE rowid IN (${placeholders}) ${namespaceFilter}`).all(...sortedRowIds) as any[];
+            const mems = db.prepare(`SELECT rowid, * FROM memories WHERE rowid IN (${placeholders}) ${namespaceFilter}`).all(...sortedRowIds, ...nsParams) as any[];
             
             const memMap = new Map();
             mems.forEach(m => memMap.set(Number(m.rowid), m));
@@ -288,17 +333,25 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (results.length > 0) {
-          const ids = results.map(r => `'${r.id}'`).join(',');
-          db.prepare(`UPDATE memories SET access_count = access_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id IN (${ids})`).run();
+          // Parameterise the IN-clause. The previous build wrapped every id
+          // in quotes and concatenated them straight into the SQL — a real
+          // SQL-injection vector even though nanoid is alphanumeric, because
+          // future schema changes or direct DB edits could let arbitrary
+          // text reach this query.
+          const ids = results.map(r => r.id);
+          const placeholders = ids.map(() => '?').join(',');
+          db.prepare(
+            `UPDATE memories SET access_count = access_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`
+          ).run(...ids);
         }
 
-        return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+        return { content: [{ type: 'text', text: safeStringify(results) }] };
       }
 
       case 'recall_get': {
         const args = RecallGetSchema.parse(request.params.arguments);
         const mem = db.prepare('SELECT * FROM memories WHERE id = ?').get(args.id);
-        return { content: [{ type: 'text', text: mem ? JSON.stringify(mem, null, 2) : JSON.stringify({ error: 'Memory not found' }) }] };
+        return { content: [{ type: 'text', text: mem ? safeStringify(mem) : safeStringify({ error: 'Memory not found' }) }] };
       }
 
       case 'recall_forget': {
@@ -314,7 +367,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
             db.prepare('UPDATE memories SET weight = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(nextWeight, args.id);
           }
         }
-        return { content: [{ type: 'text', text: JSON.stringify({ success: true, id: args.id, mode: args.mode }) }] };
+        return { content: [{ type: 'text', text: safeStringify({ success: true, id: args.id, mode: args.mode }) }] };
       }
 
       case 'recall_digest': {
