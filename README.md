@@ -348,3 +348,17 @@ This project is open source and available under the [MIT License](LICENSE).
   <sub>Built with 🧠 by <a href="https://github.com/mturac">Mehmet Turaç</a></sub><br/>
   <sub>Give your AI agents the gift of memory.</sub>
 </p>
+
+---
+
+## Part of [mturac/tools](https://github.com/mturac/tools)
+
+This project is part of an open-source toolkit for AI-augmented engineering — Claude Code plugins, MCP servers, security scanners, schedulers, and dev-productivity utilities. See the [hub](https://github.com/mturac/tools) for the full list.
+
+Install every Claude Code plugin from one place:
+
+```text
+/plugin marketplace add mturac/claude-plugin-marketplace
+/plugin install recall-mcp
+```
+
